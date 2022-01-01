@@ -1,7 +1,6 @@
 #! /usr/bin/env python3
 
-import sys
-import argparse
+import glob, os, argparse
 
 from freydom import FreyVoiceEnhancer
 
@@ -14,14 +13,19 @@ parser = argparse.ArgumentParser(
 )
 
 parser.add_argument(
-    'file',
+    'filename',
     help='File to process'
 )
 
-args = parser.parse_args()
-if args.file is not None:
-    fve = FreyVoiceEnhancer(args.file)
-    fve.process()
-    exit(0)
+if __name__ == '__main__':
+    args = parser.parse_args()
+    if args.filename is None:
+        parser.print_help()
+        exit(0)
 
-parser.print_help()
+    fve = FreyVoiceEnhancer()
+    for fp in glob.glob('./data/*.wav'):
+        if fp.index('-processed') is not None:
+            continue
+
+        fve.process(args.filename)
