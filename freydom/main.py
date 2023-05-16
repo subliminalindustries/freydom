@@ -124,6 +124,9 @@ class FreyVoiceEnhancer(AudioFile):
     freq_scale = None
     spectral_lines = None
 
+    flt_band_start = None
+    flt_band_stop = None
+
     x_max = None
     x_min = None
     y_max = None
@@ -132,47 +135,82 @@ class FreyVoiceEnhancer(AudioFile):
     def __init__(self):
         super(FreyVoiceEnhancer, self).__init__()
 
-    def process(self, filename: str, block_size: int = 128):
+    def process(self, filename: str, block_size: int = 128, flt_band_start: float = 60.0, flt_band_stop: float = 120.0,
+                convolve: bool = False):
         """
         Process an audio file
 
         Parameters
         ________
+        :param flt_band_start:
+            start frequency for temporal filter
+        :param flt_band_stop:
+            stop frequency for temporal filter
         :param filename: str
             path to audio file
         :param block_size: int
             number of samples to acquire for each fft transform
         """
 
+        self.convolve = convolve
+        self.block_size = block_size
+        self.flt_band_start = flt_band_start
+        self.flt_band_stop = flt_band_stop
+
+        if type(self.block_size) == list:
+            self.block_size = block_size[0]
+        if type(self.flt_band_start) == list:
+            self.flt_band_start = flt_band_start[0]
+        if type(self.flt_band_stop) == list:
+            self.flt_band_stop = flt_band_stop[0]
+
         self.load(filename)
 
-        self.block_size = block_size
-        self.frame_size = block_size * self.sampling_period
-        self.spectral_lines = int(round(block_size / 2 + 1))
+        self.frame_size = self.block_size * self.sampling_period
+        self.spectral_lines = int(round(self.block_size / 2 + 1))
         self.freq_scale = np.linspace(0, self.band_width, self.spectral_lines)
 
-        print(f'Filename:        {self.filename}\n')
-        print(f'Total samples:   {self.n_samples}')
-        print(f'Sample rate:     {self.sampling_rate}Hz')
-        print(f'Sampling period: {self.sampling_period}s')
-        print(f'Block size:      {self.block_size}')
-        print(f'Frame size:      {self.frame_size}s')
+        print(f'Filename:           {self.filename}\n')
+        print(f'Total samples:      {self.n_samples}')
+        print(f'Sample rate:        {self.sampling_rate}Hz')
+        print(f'Sampling period:    {self.sampling_period}s')
+        print(f'Block size:         {self.block_size}')
+        print(f'Frame size:         {self.frame_size}s\n')
 
         self.y_min = 0.0000001
         self.y_max = 1.0
         self.x_min = 0.0
         self.x_max = 22000.0
 
-        print(f'Y-min:           {self.y_min}')
-        print(f'Y-max:           {self.y_max}')
-        print(f'X-min:           {self.x_min}Hz')
-        print(f'X-max:           {self.x_max}Hz')
-
         block_indices = np.arange(0, self.n_samples-1, self.block_size)
 
         self.output_data = []
 
-        print('\nFiltering..')
+        start = self.flt_band_start
+        stop = self.flt_band_stop
+
+        x_freqs = rfftfreq(n=self.block_size-1, d=self.sampling_period).astype(dtype=float)
+        for k, v in np.ndenumerate(x_freqs):
+            if v >= start:
+                self.flt_band_start = k[0] - 1
+                break
+        for k, v in np.ndenumerate(x_freqs):
+            if v >= stop:
+                self.flt_band_stop = k[0]
+                break
+        # if self.flt_band_start > 1:
+        #     self.flt_band_start = self.flt_band_start - 1
+
+        if self.flt_band_start == self.flt_band_stop == 1:
+            self.flt_band_start = 0
+
+        self.flt_band_start = max(0, self.flt_band_start)
+        self.flt_band_stop = min(self.flt_band_stop, x_freqs.size-1)
+
+        print(f'Closest inclusive filter band start frequency to {start}Hz: {x_freqs[self.flt_band_start]}Hz')
+        print(f'Closest inclusive filter band stop frequency to {stop}Hz: {x_freqs[self.flt_band_stop]}Hz\n')
+
+        print('Filtering..')
         for block_index in block_indices:
             try:
                 self.process_block(block_index)
@@ -183,22 +221,20 @@ class FreyVoiceEnhancer(AudioFile):
 
         x = np.arange(0, self.n_samples, self.block_size).astype(dtype=list)
         mult_sig_x = np.arange(0, (self.n_samples // 2)+1).astype(dtype=list)
-        interp = CubicSpline(x, self.output_data)
+        self.output_data = np.nan_to_num(self.output_data, nan=self.y_min, neginf=self.y_min, posinf=self.y_max)
+        interp = CubicSpline(x[:self.output_data.size], self.output_data)
         mult_sig_y = interp(mult_sig_x)
 
         # multiply signal by filter and subtract filter
-        out_fft = np.subtract(np.multiply(wav_fft, mult_sig_y), mult_sig_y)
+        # out_fft = (wav_fft * mult_sig_y) - wav_fft
+        # out_fft = wav_fft * mult_sig_y * mult_sig_y
+        out_fft = wav_fft * mult_sig_y
+
+        if self.convolve:
+            out_fft = signal.fftconvolve(wav_fft, out_fft, mode='same')
+
         res = irfft(out_fft)
 
-        # axes = plt.axes()
-        # axes.set_ybound(-1, 1)
-        # axes.set_ylim(-1, 1)
-        # axes.plot(np.arange(0, self.waveform.size), self.waveform)
-        # axes.plot(np.arange(0, res.size), res)
-        # plt.axes(axes)
-        # plt.show()
-
-        # exit()
         self.save(res)
 
     def process_block(self, block_index: int):
@@ -222,20 +258,8 @@ class FreyVoiceEnhancer(AudioFile):
         fft_data = rfft(chunk)           # type: np.ndarray
 
         fft_lin = np.abs(fft_data)
-        fft_lin = minmax_scale(fft_lin, (self.y_min, 1.0))
-        fft_lin = np.nan_to_num(fft_lin, nan=self.y_min, posinf=1.0, neginf=self.y_min)
+        fft_lin = minmax_scale(fft_lin, (self.y_min, self.y_max))
+        fft_lin = np.nan_to_num(fft_lin, nan=self.y_min, posinf=self.y_max, neginf=self.y_min)
 
-        # x = rfftfreq(n=self.block_size - 1, d=self.sampling_period)
-        y = fft_lin
-
-        # The 0th bin contains the most information about the changes in amplitude due to v2k speech
-        self.output_data.append(y[0])
-
-        # axes = plt.axes()
-        # axes.set_xbound(0, self.x_max)
-        # axes.set_xlim(0, self.x_max)
-        # axes.set_ybound(self.y_min, self.y_max)
-        # axes.set_ylim(self.y_min, self.y_max)
-        # axes.hist2d(x, y, self.block_size)
-        # plt.axes(axes)
-        # plt.show()
+        # Append the max of the values in the bins that contain the signal most similar to speech
+        self.output_data.append(np.max(fft_lin[self.flt_band_start:self.flt_band_stop]))
