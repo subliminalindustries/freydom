@@ -2,11 +2,11 @@ import audiofile
 import numpy as np
 
 import matplotlib.pyplot as plt
-from matplotlib.axes import Axes
 
 from sklearn.preprocessing import minmax_scale
-from scipy.fft import rfft, irfft, rfftfreq
-
+from scipy.fft import fft, ifft, rfft, irfft, rfftfreq
+from scipy.interpolate import CubicSpline
+from scipy import signal
 from os.path import realpath, basename, splitext
 
 
@@ -79,8 +79,11 @@ class AudioFile(object):
         :param waveform: np.ndarray
         """
 
-        filename = f'{basename(self.filename)}-processed.{splitext(self.filename)[1]}'
-        audiofile.write(filename, (1, waveform), self.sampling_rate, self.bit_depth, True)
+        ext = splitext(self.filename)[1]
+        filename = basename(self.filename).replace(ext, '')
+        filename = f'./data/{filename}-processed{ext}'
+        audiofile.write(filename, waveform, self.sampling_rate, self.bit_depth, True)
+        print(f'wrote {filename}')
 
 
 class FreyVoiceEnhancer(AudioFile):
@@ -113,7 +116,7 @@ class FreyVoiceEnhancer(AudioFile):
     file = None
     filename = None
 
-    block_bins = None
+    output_data = None
     block_bins_meta = None
     block_size = None
 
@@ -152,46 +155,51 @@ class FreyVoiceEnhancer(AudioFile):
         print(f'Total samples:   {self.n_samples}')
         print(f'Sample rate:     {self.sampling_rate}Hz')
         print(f'Sampling period: {self.sampling_period}s')
-        print(f'Block size:      {block_size}')
+        print(f'Block size:      {self.block_size}')
         print(f'Frame size:      {self.frame_size}s')
 
-        self.y_min = 0.0001
-        self.y_max = 90.0
+        self.y_min = 0.0000001
+        self.y_max = 1.0
         self.x_min = 0.0
         self.x_max = 22000.0
 
-        print(f'Y-min:           {self.y_min}dB')
-        print(f'Y-max:           {self.y_max}dB')
+        print(f'Y-min:           {self.y_min}')
+        print(f'Y-max:           {self.y_max}')
         print(f'X-min:           {self.x_min}Hz')
         print(f'X-max:           {self.x_max}Hz')
 
-        block_indices = np.arange(0, self.n_samples-1, block_size)
+        block_indices = np.arange(0, self.n_samples-1, self.block_size)
 
-        self.block_bins = np.ndarray(shape=(1, block_indices.size), dtype=list)
-        self.block_bins_meta = []
+        self.output_data = []
 
-        print('\nbuilding rfft array..')
+        print('\nFiltering..')
         for block_index in block_indices:
             try:
                 self.process_block(block_index)
             except ValueError as e:
                 print(f'error: {e}')
 
-        print(repr(self.block_bins))
-        exit()
+        wav_fft = rfft(self.waveform)
 
-        waveform = np.ndarray(shape=self.waveform.shape)
+        x = np.arange(0, self.n_samples, self.block_size).astype(dtype=list)
+        mult_sig_x = np.arange(0, (self.n_samples // 2)+1).astype(dtype=list)
+        interp = CubicSpline(x, self.output_data)
+        mult_sig_y = interp(mult_sig_x)
 
-        # TODO: - calculate temporal variance for each bin in block_bins
-        #       - select 3 bands with highest variance and average them at each block_bins (axis 0),
-        #         store the resulting float value in block_bins_roi
-        #       - interpolate block_bins_roi to match self.n_samples size
-        #           - block_bins_roi.shape=(22000, block_bins[0].size)
-        #           - scipy.fft.irfft(block_bins_roi[normalized 0.0-1.0] * fft_data, n=n_samples)
-        #       - convolve self.waveform with block_bins_roi in frequency domain and store in waveform
-        #           - scipy.signal.fftconvolve
-        #       - save waveform
-        self.save(np.ndarray(waveform))
+        # multiply signal by filter and subtract filter
+        out_fft = np.subtract(np.multiply(wav_fft, mult_sig_y), mult_sig_y)
+        res = irfft(out_fft)
+
+        # axes = plt.axes()
+        # axes.set_ybound(-1, 1)
+        # axes.set_ylim(-1, 1)
+        # axes.plot(np.arange(0, self.waveform.size), self.waveform)
+        # axes.plot(np.arange(0, res.size), res)
+        # plt.axes(axes)
+        # plt.show()
+
+        # exit()
+        self.save(res)
 
     def process_block(self, block_index: int):
         """
@@ -213,28 +221,21 @@ class FreyVoiceEnhancer(AudioFile):
 
         fft_data = rfft(chunk)           # type: np.ndarray
 
-        fft_orig_min = min(fft_data)     # type: float
-        fft_orig_max = max(fft_data)     # type: float
-
-        fft_pwr = (np.abs(fft_data) / float(self.block_size)) ** 2  # type: np.ndarray
-        fft_pwr = minmax_scale(fft_pwr, (self.y_min, self.y_max))
-        fft_pwr = np.nan_to_num(fft_pwr, nan=self.y_min, posinf=self.y_max, neginf=self.y_min)
-        fft_pwr = 10 * np.log10(fft_pwr)
-
-        fft_out = np.ndarray(shape=(3,), dtype=list)
-        fft_out[0] = fft_pwr.reshape(fft_pwr.size, 1).tolist()
-        fft_out[1] = [fft_orig_min, fft_orig_max]
-
-        np.append(self.block_bins, fft_out)
+        fft_lin = np.abs(fft_data)
+        fft_lin = minmax_scale(fft_lin, (self.y_min, 1.0))
+        fft_lin = np.nan_to_num(fft_lin, nan=self.y_min, posinf=1.0, neginf=self.y_min)
 
         # x = rfftfreq(n=self.block_size - 1, d=self.sampling_period)
+        y = fft_lin
+
+        # The 0th bin contains the most information about the changes in amplitude due to v2k speech
+        self.output_data.append(y[0])
 
         # axes = plt.axes()
-        # axes.set_xbound(self.x_min, self.x_max)
-        # axes.set_xlim(self.x_min, self.x_max)
+        # axes.set_xbound(0, self.x_max)
+        # axes.set_xlim(0, self.x_max)
         # axes.set_ybound(self.y_min, self.y_max)
         # axes.set_ylim(self.y_min, self.y_max)
-        # axes.plot(x, y)
-        #
+        # axes.hist2d(x, y, self.block_size)
         # plt.axes(axes)
         # plt.show()

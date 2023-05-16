@@ -23,9 +23,4 @@ if __name__ == '__main__':
         parser.print_help()
         exit(0)
 
-    fve = FreyVoiceEnhancer()
-    for fp in glob.glob('./data/*.wav'):
-        if fp.index('-processed') is not None:
-            continue
-
-        fve.process(args.filename)
+    fve = FreyVoiceEnhancer().process(args.filename)
