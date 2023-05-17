@@ -20,7 +20,7 @@ parser.add_argument(
 parser.add_argument(
     '-s',
     '--block-size',
-    help='fft block size (lower means wider filter frequency bandwidth but more accurately generated temporal waveform)',
+    help='fft block size (lower means wider filter frequency bandwidth but a more accurate time-domain filter)',
     type=int,
     nargs=1,
     default=512,
@@ -37,14 +37,6 @@ parser.add_argument(
     action='store'
 )
 
-parser.add_argument(
-    '-c',
-    '--convolve',
-    help='convolve FFT output with input waveform (can yield more audible results under some circumstances but noisy)',
-    default=False,
-    action='store_true'
-)
-
 if __name__ == '__main__':
     args = parser.parse_args()
     if args.filename is None:
@@ -56,5 +48,4 @@ if __name__ == '__main__':
 
     fve = FreyVoiceEnhancer().process(args.filename,
                                       fft_n=args.block_size,
-                                      flt_bws=args.band_width,
-                                      fft_convolve=args.convolve)
+                                      flt_bws=args.band_width)

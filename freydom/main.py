@@ -1,12 +1,7 @@
-import traceback
-
 import numpy as np
-import  matplotlib.pyplot as plt
 
 from sklearn.preprocessing import minmax_scale
-from scipy.signal import cspline1d, cspline1d_eval, fftconvolve
 from scipy.fft import rfft, irfft, rfftfreq
-from scipy.interpolate import CubicSpline
 
 from .waveform import WaveForm
 
@@ -19,7 +14,7 @@ class FreyVoiceEnhancer(WaveForm):
 
     Attributes
     ----------
-    :ivar filt_spectral: list
+    :ivar flt_spectral: list
         spectral filter
     :ivar block_size: int
         number of samples to acquire for each fft transform
@@ -73,11 +68,7 @@ class FreyVoiceEnhancer(WaveForm):
         self.x_min = 0.0
         self.x_max = 22000.0
 
-    def process(self,
-                filename: str,
-                fft_n: int,
-                flt_bws: list,
-                fft_convolve: bool):
+    def process(self, filename: str, fft_n: int, flt_bws: list):
         """
         Process an audio file
 
@@ -96,8 +87,6 @@ class FreyVoiceEnhancer(WaveForm):
 
         self.load(filename)
 
-        self.fft_convolve = fft_convolve
-
         if type(fft_n) == list:
             fft_n = fft_n[0]
         self.fft_n = fft_n
@@ -113,16 +102,17 @@ class FreyVoiceEnhancer(WaveForm):
         print(f'Block size:         {self.fft_n}')
         print(f'Frame size:         {self.frame_size}s\n')
 
-        print('Generating frequency-domain filter..')
-
         self.flt_bws = self.get_nearest_inclusive_frequencies(flt_bws)
+
+        print('\nGenerating frequency-domain filter..')
+
         self.flt_spectral = np.zeros(shape=(int(self.fft_n / 2),))
         for (lower, upper) in self.flt_bws:
             self.flt_spectral[lower:upper] = 1.
 
         weights = [.05, .1, .15, .20, .20, .15, .1, .05]
         self.flt_spectral = np.convolve(self.flt_spectral, np.array(weights)[::-1], 'same')
-        # self.new_waveform = np.zeros_like(self.waveform)
+        self.new_waveform = np.ndarray([])
 
         print('Generating time-domain filter..')
 
@@ -135,44 +125,33 @@ class FreyVoiceEnhancer(WaveForm):
                 flt_waveform.append(fft_block)
             except ValueError as e:
                 print(f'error: {e}')
-                # print(traceback.format_exc())
 
         # Take rfft of original waveform
-        print('\nAcquiring FFT from input waveform..')
+        print('Acquiring FFT from input waveform..')
+
         self.waveform = np.nan_to_num(self.waveform, nan=self.y_min, neginf=self.y_min, posinf=self.y_max)
-        self.waveform = minmax_scale(self.waveform, (-1.0, 1.0))
-        # fft_wav = rfft(self.new_waveform)
-        fft_wav = rfft(self.waveform)
+        self.waveform = minmax_scale(self.waveform, (-1., 1.))
+        self.new_waveform = np.nan_to_num(self.new_waveform, nan=self.y_min, neginf=self.y_min, posinf=self.y_max)
+        self.new_waveform = minmax_scale(self.new_waveform, (-1., 1.))
+        self.waveform = self.waveform[:self.new_waveform.size]
 
-        # Extrapolate filter signal to number of samples in rfft
-        print('Interpolating filter..')
-        flt = np.interp(np.linspace(0, len(flt_waveform) - 1, num=fft_wav.size), np.arange(len(flt_waveform)),
-                        flt_waveform)
+        diff = np.mean(self.new_waveform) - np.mean(self.waveform)
+        self.new_waveform = np.subtract(self.new_waveform, diff)
 
-        print('Applying time-domain filter..')
-        fft_out = fft_wav * flt
-
-        # Optionally convolve waveform with output fft
-        if self.fft_convolve:
-            print('Convolving..')
-            fft_out = fftconvolve(fft_out, fft_wav, mode='same')
-
-        # fft_wav_real = np.real(fft_wav[1:])
-        # # fft_wav_real = minmax_scale(fft_wav_real[1:], (-1., 1.))
-        # fft_out_real = np.real(fft_out[1:])
-        # # fft_out_real = minmax_scale(fft_out_real[1:], (-1., 1.))
-        # fft_flt_real = np.real(flt[1:]).clip(-1., 1.)
-        # # fft_flt_real = minmax_scale(fft_flt_real, (-1., 1.))
-        #
-        # fig, ax = plt.subplots()
-        # plt.plot(np.arange(fft_wav_real.size), fft_wav_real, 'C1', label='input')
-        # plt.plot(np.arange(fft_out_real.size), fft_out_real, 'C2', label='output')
-        # plt.plot(np.arange(flt.size), flt, 'C3', label='filter')
-        # ax.legend()
-        # plt.show()
+        fft_wav = rfft(self.new_waveform)
 
         print('Acquiring output waveform from inverse FFT..')
-        res = irfft(fft_out)
+        res = irfft(fft_wav)
+
+        # Extrapolate filter signal to number of samples in rfft
+        print('Interpolating time-domain filter..')
+
+        flt = np.interp(np.linspace(0, len(flt_waveform)-1, num=(fft_wav.size-1) * 2),
+                        np.arange(len(flt_waveform)), flt_waveform)
+
+        print('Applying time-domain filter..')
+
+        res = minmax_scale(res * flt, (0., 1.))
 
         self.save(res)
 
@@ -228,8 +207,8 @@ class FreyVoiceEnhancer(WaveForm):
             chunk = self.waveform[block_index:block_index + self.fft_n - 1]
 
         fft_data = rfft(chunk)  # type: np.ndarray
-        # fft_conv = fftconvolve(self.flt_spectral, fft_data)
-        # np.append(self.new_waveform, irfft(fft_conv))
+        fft_conv = self.flt_spectral * fft_data
+        self.new_waveform = np.append(self.new_waveform, irfft(fft_conv[1:]))
 
         # Real part of FFT scaled to y_min-y_max (see __init__)
         fft_lin = np.abs(fft_data)
