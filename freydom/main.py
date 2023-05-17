@@ -1,92 +1,17 @@
-import audiofile
-import numpy as np
+import traceback
 
-import matplotlib.pyplot as plt
+import numpy as np
+import  matplotlib.pyplot as plt
 
 from sklearn.preprocessing import minmax_scale
-from scipy.fft import fft, ifft, rfft, irfft, rfftfreq
+from scipy.signal import cspline1d, cspline1d_eval, fftconvolve
+from scipy.fft import rfft, irfft, rfftfreq
 from scipy.interpolate import CubicSpline
-from scipy import signal
-from os.path import realpath, basename, splitext
+
+from .waveform import WaveForm
 
 
-class AudioFile(object):
-    """
-    Audio File Interface
-
-    Loads audio files and allows saving modified waveform.
-
-    Attributes
-    ----------
-    band_width: int
-        sampling rate / 2
-    bit_depth: int
-        bit depth
-    duration: float
-        duration in seconds
-    filename: str
-        filename
-    n_samples: int
-        total number of samples
-    sampling_period: int
-        time in seconds needed to acquire one block of samples
-    sampling_rate: int
-        number of samples per second
-    waveform: np.ndarray
-        raw audio data
-    """
-
-    band_width = None
-    bit_depth = None
-    duration = None
-    filename = None
-    n_samples = None
-    sampling_period = None
-    sampling_rate = None
-    waveform = None
-
-    def __init__(self):
-        """
-        Constructor
-        """
-
-        super(AudioFile, self).__init__()
-
-    def load(self, filename: str):
-        """
-        Loads an audio file
-
-        :param filename: str
-        """
-        self.filename = realpath(filename)
-
-        signal, self.sampling_rate = audiofile.read(filename, always_2d=True)
-        self.waveform = signal[0]
-
-        self.bit_depth = audiofile.bit_depth(filename)
-        self.duration = audiofile.duration(filename)
-
-        self.band_width = self.sampling_rate / 2.0
-        self.n_samples = self.waveform.size
-        self.sampling_period = 1.0 / self.sampling_rate
-
-    def save(self, waveform: np.ndarray):
-        """
-        Saves waveform to filename with added suffix '-processed':
-
-            input.wav becomes input-processed.wav
-
-        :param waveform: np.ndarray
-        """
-
-        ext = splitext(self.filename)[1]
-        filename = basename(self.filename).replace(ext, '')
-        filename = f'./data/{filename}-processed{ext}'
-        audiofile.write(filename, waveform, self.sampling_rate, self.bit_depth, True)
-        print(f'wrote {filename}')
-
-
-class FreyVoiceEnhancer(AudioFile):
+class FreyVoiceEnhancer(WaveForm):
     """
     Frey Voice Enhancer
 
@@ -94,148 +19,198 @@ class FreyVoiceEnhancer(AudioFile):
 
     Attributes
     ----------
-    block_size: int
+    :ivar filt_spectral: list
+        spectral filter
+    :ivar block_size: int
         number of samples to acquire for each fft transform
-    frame_size: int
+    :ivar convolve: bool
+        whether to convolve the input waveform with the filter output
+    :ivar filename: str
+        path to audio file
+    :ivar flt_band_start: float
+        start frequency for temporal filter
+    :ivar flt_band_stop: float
+        stop frequency for temporal filter
+    :ivar flt_bands: list
+        contains lists containing filter band lower and upper cutoff frequencies
+    :ivar frame_size: int
         time (s) to sample 1 block:
         (block_size * file sampling_period) or (block_size / file sampling_rate)
-    freq_scale: list
+    :ivar freq_scale: list
         frequency scale
-    spectral_lines: int
+    :ivar spectral_lines: int
         number of frequency samples
-    x_max: float
+    :ivar new_waveform: np.ndarray
+        new waveform after spectral filter
+    :ivar x_max: float
         chart maximum x value
-    x_min: float
+    :ivar x_min: float
         chart minimum x value
-    y_max: float
+    :ivar y_max: float
         chart maximum y value
-    y_min: float
+    :ivar y_min: float
         chart minimum y value
     """
-
-    file = None
-    filename = None
-
-    output_data = None
-    block_bins_meta = None
-    block_size = None
-
-    frame_size = None
-    freq_scale = None
-    spectral_lines = None
-
-    flt_band_start = None
-    flt_band_stop = None
-
-    x_max = None
-    x_min = None
-    y_max = None
-    y_min = None
 
     def __init__(self):
         super(FreyVoiceEnhancer, self).__init__()
 
-    def process(self, filename: str, block_size: int = 128, flt_band_start: float = 60.0, flt_band_stop: float = 120.0,
-                convolve: bool = False):
-        """
-        Process an audio file
-
-        Parameters
-        ________
-        :param flt_band_start:
-            start frequency for temporal filter
-        :param flt_band_stop:
-            stop frequency for temporal filter
-        :param filename: str
-            path to audio file
-        :param block_size: int
-            number of samples to acquire for each fft transform
-        """
-
-        self.convolve = convolve
-        self.block_size = block_size
-        self.flt_band_start = flt_band_start
-        self.flt_band_stop = flt_band_stop
-
-        if type(self.block_size) == list:
-            self.block_size = block_size[0]
-        if type(self.flt_band_start) == list:
-            self.flt_band_start = flt_band_start[0]
-        if type(self.flt_band_stop) == list:
-            self.flt_band_stop = flt_band_stop[0]
-
-        self.load(filename)
-
-        self.frame_size = self.block_size * self.sampling_period
-        self.spectral_lines = int(round(self.block_size / 2 + 1))
-        self.freq_scale = np.linspace(0, self.band_width, self.spectral_lines)
-
-        print(f'Filename:           {self.filename}\n')
-        print(f'Total samples:      {self.n_samples}')
-        print(f'Sample rate:        {self.sampling_rate}Hz')
-        print(f'Sampling period:    {self.sampling_period}s')
-        print(f'Block size:         {self.block_size}')
-        print(f'Frame size:         {self.frame_size}s\n')
+        self.new_waveform = None
+        self.flt_spectral = None
+        self.fft_n = None
+        self.fft_convolve = None
+        self.filename = None
+        self.flt_band_start = None
+        self.flt_band_stop = None
+        self.flt_bws = None
+        self.frame_size = None
+        self.freq_scale = None
+        self.output_data = None
+        self.spectral_lines = None
 
         self.y_min = 0.0000001
         self.y_max = 1.0
         self.x_min = 0.0
         self.x_max = 22000.0
 
-        block_indices = np.arange(0, self.n_samples-1, self.block_size)
+    def process(self,
+                filename: str,
+                fft_n: int,
+                flt_bws: list,
+                fft_convolve: bool):
+        """
+        Process an audio file
 
-        self.output_data = []
+        Parameters
+        ________
+        :param fft_convolve:
+            whether to convolve the input waveform with the filter output
+        :param flt_bws: str:
+            tuples of filter cutoff frequencies (lower, upper)
+            structure: [(0., 120.), (650., 900.), .., (15000., 16000.)]
+        :param filename: str
+            path to audio file
+        :param fft_n: int
+            number of samples to acquire for each fft transform
+        """
 
-        start = self.flt_band_start
-        stop = self.flt_band_stop
+        self.load(filename)
 
-        x_freqs = rfftfreq(n=self.block_size-1, d=self.sampling_period).astype(dtype=float)
-        for k, v in np.ndenumerate(x_freqs):
-            if v >= start:
-                self.flt_band_start = k[0] - 1
-                break
-        for k, v in np.ndenumerate(x_freqs):
-            if v >= stop:
-                self.flt_band_stop = k[0]
-                break
-        # if self.flt_band_start > 1:
-        #     self.flt_band_start = self.flt_band_start - 1
+        self.fft_convolve = fft_convolve
 
-        if self.flt_band_start == self.flt_band_stop == 1:
-            self.flt_band_start = 0
+        if type(fft_n) == list:
+            fft_n = fft_n[0]
+        self.fft_n = fft_n
 
-        self.flt_band_start = max(0, self.flt_band_start)
-        self.flt_band_stop = min(self.flt_band_stop, x_freqs.size-1)
+        self.frame_size = self.fft_n * self.sampling_period
+        self.spectral_lines = int(round((self.fft_n / 2) + 1))
+        self.freq_scale = np.linspace(0, self.band_width, self.spectral_lines)
 
-        print(f'Closest inclusive filter band start frequency to {start}Hz: {x_freqs[self.flt_band_start]}Hz')
-        print(f'Closest inclusive filter band stop frequency to {stop}Hz: {x_freqs[self.flt_band_stop]}Hz\n')
+        print(f'Filename:           {self.filename}\n')
+        print(f'Total samples:      {self.n_samples}')
+        print(f'Sample rate:        {self.sampling_rate}Hz')
+        print(f'Sampling period:    {self.sampling_period}s')
+        print(f'Block size:         {self.fft_n}')
+        print(f'Frame size:         {self.frame_size}s\n')
 
-        print('Filtering..')
-        for block_index in block_indices:
+        print('Generating frequency-domain filter..')
+
+        self.flt_bws = self.get_nearest_inclusive_frequencies(flt_bws)
+        self.flt_spectral = np.zeros(shape=(int(self.fft_n / 2),))
+        for (lower, upper) in self.flt_bws:
+            self.flt_spectral[lower:upper] = 1.
+
+        weights = [.05, .1, .15, .20, .20, .15, .1, .05]
+        self.flt_spectral = np.convolve(self.flt_spectral, np.array(weights)[::-1], 'same')
+        # self.new_waveform = np.zeros_like(self.waveform)
+
+        print('Generating time-domain filter..')
+
+        flt_waveform = []
+        for block_index in np.arange(0, self.n_samples-1, self.fft_n):
+            if block_index % self.fft_n == 0:
+                print(f'Block {block_index}..', end='\r')
             try:
-                self.process_block(block_index)
+                fft_block = self.process_block(block_index)
+                flt_waveform.append(fft_block)
             except ValueError as e:
                 print(f'error: {e}')
+                # print(traceback.format_exc())
 
-        wav_fft = rfft(self.waveform)
+        # Take rfft of original waveform
+        print('\nAcquiring FFT from input waveform..')
+        self.waveform = np.nan_to_num(self.waveform, nan=self.y_min, neginf=self.y_min, posinf=self.y_max)
+        self.waveform = minmax_scale(self.waveform, (-1.0, 1.0))
+        # fft_wav = rfft(self.new_waveform)
+        fft_wav = rfft(self.waveform)
 
-        x = np.arange(0, self.n_samples, self.block_size).astype(dtype=list)
-        mult_sig_x = np.arange(0, (self.n_samples // 2)+1).astype(dtype=list)
-        self.output_data = np.nan_to_num(self.output_data, nan=self.y_min, neginf=self.y_min, posinf=self.y_max)
-        interp = CubicSpline(x[:self.output_data.size], self.output_data)
-        mult_sig_y = interp(mult_sig_x)
+        # Extrapolate filter signal to number of samples in rfft
+        print('Interpolating filter..')
+        flt = np.interp(np.linspace(0, len(flt_waveform) - 1, num=fft_wav.size), np.arange(len(flt_waveform)),
+                        flt_waveform)
 
-        # multiply signal by filter and subtract filter
-        # out_fft = (wav_fft * mult_sig_y) - wav_fft
-        # out_fft = wav_fft * mult_sig_y * mult_sig_y
-        out_fft = wav_fft * mult_sig_y
+        print('Applying time-domain filter..')
+        fft_out = fft_wav * flt
 
-        if self.convolve:
-            out_fft = signal.fftconvolve(wav_fft, out_fft, mode='same')
+        # Optionally convolve waveform with output fft
+        if self.fft_convolve:
+            print('Convolving..')
+            fft_out = fftconvolve(fft_out, fft_wav, mode='same')
 
-        res = irfft(out_fft)
+        # fft_wav_real = np.real(fft_wav[1:])
+        # # fft_wav_real = minmax_scale(fft_wav_real[1:], (-1., 1.))
+        # fft_out_real = np.real(fft_out[1:])
+        # # fft_out_real = minmax_scale(fft_out_real[1:], (-1., 1.))
+        # fft_flt_real = np.real(flt[1:]).clip(-1., 1.)
+        # # fft_flt_real = minmax_scale(fft_flt_real, (-1., 1.))
+        #
+        # fig, ax = plt.subplots()
+        # plt.plot(np.arange(fft_wav_real.size), fft_wav_real, 'C1', label='input')
+        # plt.plot(np.arange(fft_out_real.size), fft_out_real, 'C2', label='output')
+        # plt.plot(np.arange(flt.size), flt, 'C3', label='filter')
+        # ax.legend()
+        # plt.show()
+
+        print('Acquiring output waveform from inverse FFT..')
+        res = irfft(fft_out)
 
         self.save(res)
+
+    def get_nearest_inclusive_frequencies(self, cutoff_freqs):
+        print('Filter bands selected based on input:')
+
+        fft_freqs = rfftfreq(n=self.fft_n - 1, d=self.sampling_period).astype(dtype=float)
+
+        result = []
+        for i in range(0, len(cutoff_freqs)):
+            (lower, upper) = cutoff_freqs[i].split('-')
+
+            start = None
+            stop = None
+
+            for k, v in np.ndenumerate(fft_freqs):
+                if v >= float(lower):
+                    start = k[0] - 1
+                    break
+
+            for k, v in np.ndenumerate(fft_freqs):
+                if v >= float(upper):
+                    stop = k[0]
+                    break
+
+            # make bands inclusive, i.e. bandwidth encompassed input frequencies
+            if start == stop == 1:
+                start = 0
+
+            start = max(0, start)
+            stop = min(stop, fft_freqs.size-1)
+
+            print(f'- Filter {i+1}: closest inclusive lower cutoff frequency to {lower}Hz: {fft_freqs[start]}Hz')
+            print(f'- Filter {i+1}: closest inclusive upper cutoff frequency to {upper}Hz: {fft_freqs[stop]}Hz')
+
+            result.append([start, stop])
+
+        return result
 
     def process_block(self, block_index: int):
         """
@@ -245,21 +220,23 @@ class FreyVoiceEnhancer(AudioFile):
         ________
         :param block_index:
             Index of next block in waveform to process
+        :return float
         """
-        last = None
-        if block_index + self.block_size > self.n_samples:
-            last = (block_index + self.block_size) - self.n_samples - 1
-
-        if last is not None:
+        if block_index + self.fft_n > self.n_samples:
             chunk = self.waveform[block_index:self.n_samples - 1]
         else:
-            chunk = self.waveform[block_index:block_index + self.block_size - 1]
+            chunk = self.waveform[block_index:block_index + self.fft_n - 1]
 
-        fft_data = rfft(chunk)           # type: np.ndarray
+        fft_data = rfft(chunk)  # type: np.ndarray
+        # fft_conv = fftconvolve(self.flt_spectral, fft_data)
+        # np.append(self.new_waveform, irfft(fft_conv))
 
+        # Real part of FFT scaled to y_min-y_max (see __init__)
         fft_lin = np.abs(fft_data)
         fft_lin = minmax_scale(fft_lin, (self.y_min, self.y_max))
         fft_lin = np.nan_to_num(fft_lin, nan=self.y_min, posinf=self.y_max, neginf=self.y_min)
 
-        # Append the max of the values in the bins that contain the signal most similar to speech
-        self.output_data.append(np.max(fft_lin[self.flt_band_start:self.flt_band_stop]))
+        # Max of the values in the bins that contain the signal most similar to speech
+        fft_max = max(map(lambda l: np.max(fft_lin[l[0]:l[1]]), self.flt_bws))
+
+        return fft_max

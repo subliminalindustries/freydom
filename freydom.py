@@ -14,11 +14,11 @@ parser = argparse.ArgumentParser(
 
 parser.add_argument(
     'filename',
-    help='File to process'
+    help='file to process'
 )
 
 parser.add_argument(
-    '-b',
+    '-s',
     '--block-size',
     help='fft block size (lower means wider filter frequency bandwidth but more accurately generated temporal waveform)',
     type=int,
@@ -28,29 +28,19 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    '-l',
-    '--band-start',
-    help='filter band start frequency (Hz)',
-    type=float,
-    nargs=1,
-    default=7000.0,
-    action='store'
-)
-
-parser.add_argument(
-    '-r',
-    '--band-stop',
-    help='filter band stop frequency (Hz)',
-    type=float,
-    nargs=1,
-    default=15000.0,
+    '-b',
+    '--band-width',
+    help='filter band-widths (Hz) (for example: -b 160-300 600-700)',
+    type=str,
+    nargs='+',
+    default='0-120',
     action='store'
 )
 
 parser.add_argument(
     '-c',
     '--convolve',
-    help='convolve output with input (can yield more audible results under some circumstances but noisy)',
+    help='convolve FFT output with input waveform (can yield more audible results under some circumstances but noisy)',
     default=False,
     action='store_true'
 )
@@ -61,6 +51,10 @@ if __name__ == '__main__':
         parser.print_help()
         exit(0)
 
-    print(args)
-    fve = FreyVoiceEnhancer().process(args.filename, block_size=args.block_size, flt_band_start=args.band_start,
-                                      flt_band_stop=args.band_stop, convolve=args.convolve)
+    if type(args.band_width) == str:
+        args.band_width = [args.band_width]
+
+    fve = FreyVoiceEnhancer().process(args.filename,
+                                      fft_n=args.block_size,
+                                      flt_bws=args.band_width,
+                                      fft_convolve=args.convolve)
