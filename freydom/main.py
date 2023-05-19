@@ -74,8 +74,6 @@ class FreyVoiceEnhancer(WaveForm):
 
         Parameters
         ________
-        :param fft_convolve:
-            whether to convolve the input waveform with the filter output
         :param flt_bws: str:
             tuples of filter cutoff frequencies (lower, upper)
             structure: [(0., 120.), (650., 900.), .., (15000., 16000.)]
@@ -100,22 +98,21 @@ class FreyVoiceEnhancer(WaveForm):
         print(f'Sample rate:        {self.sampling_rate}Hz')
         print(f'Sampling period:    {self.sampling_period}s')
         print(f'Block size:         {self.fft_n}')
-        print(f'Frame size:         {self.frame_size}s\n')
+        print(f'Frame size:         ~{np.round(self.frame_size, 4)}s\n')
 
         self.flt_bws = self.get_nearest_inclusive_frequencies(flt_bws)
 
         print('\nGenerating frequency-domain filter..')
-
         self.flt_spectral = np.zeros(shape=(int(self.fft_n / 2),))
         for (lower, upper) in self.flt_bws:
             self.flt_spectral[lower:upper] = 1.
 
+        print('Smoothing frequency-domain filter..')
         weights = [.05, .1, .15, .20, .20, .15, .1, .05]
         self.flt_spectral = np.convolve(self.flt_spectral, np.array(weights)[::-1], 'same')
         self.new_waveform = np.ndarray([])
 
-        print('Generating time-domain filter..')
-
+        print('Generating time-domain filter while filtering using frequency-domain filter..')
         flt_waveform = []
         for block_index in np.arange(0, self.n_samples-1, self.fft_n):
             if block_index % self.fft_n == 0:
@@ -128,7 +125,6 @@ class FreyVoiceEnhancer(WaveForm):
 
         # Take rfft of original waveform
         print('Acquiring FFT from input waveform..')
-
         self.waveform = np.nan_to_num(self.waveform, nan=self.y_min, neginf=self.y_min, posinf=self.y_max)
         self.waveform = minmax_scale(self.waveform, (-1., 1.))
         self.new_waveform = np.nan_to_num(self.new_waveform, nan=self.y_min, neginf=self.y_min, posinf=self.y_max)
@@ -136,21 +132,18 @@ class FreyVoiceEnhancer(WaveForm):
         self.waveform = self.waveform[:self.new_waveform.size]
 
         diff = np.mean(self.new_waveform) - np.mean(self.waveform)
-        self.new_waveform = np.subtract(self.new_waveform, diff)
+        res = np.subtract(self.new_waveform, diff)
 
-        fft_wav = rfft(self.new_waveform)
-
-        print('Acquiring output waveform from inverse FFT..')
-        res = irfft(fft_wav)
-
-        # Extrapolate filter signal to number of samples in rfft
+        # Interpolate time-domain filter to number of samples in new waveform
         print('Interpolating time-domain filter..')
-
-        flt = np.interp(np.linspace(0, len(flt_waveform)-1, num=(fft_wav.size-1) * 2),
+        flt = np.interp(np.linspace(0, len(flt_waveform)-1, num=res.size),
                         np.arange(len(flt_waveform)), flt_waveform)
 
-        print('Applying time-domain filter..')
+        print('Smoothing time-domain filter..')
+        weights = [.05, .1, .15, .20, .20, .15, .1, .05]
+        flt = minmax_scale(np.convolve(flt, np.array(weights)[::-1], 'same'), (0., 1.))
 
+        print('Applying time-domain filter..')
         res = minmax_scale(res * flt, (0., 1.))
 
         self.save(res)
@@ -184,8 +177,8 @@ class FreyVoiceEnhancer(WaveForm):
             start = max(0, start)
             stop = min(stop, fft_freqs.size-1)
 
-            print(f'- Filter {i+1}: closest inclusive lower cutoff frequency to {lower}Hz: {fft_freqs[start]}Hz')
-            print(f'- Filter {i+1}: closest inclusive upper cutoff frequency to {upper}Hz: {fft_freqs[stop]}Hz')
+            print(f'- Filter {i+1}: closest inclusive low cutoff for {lower}Hz: ~{np.round(fft_freqs[start], 4)}Hz')
+            print(f'- Filter {i+1}: closest inclusive high cutoff for {upper}Hz: ~{np.round(fft_freqs[stop], 4)}Hz')
 
             result.append([start, stop])
 
@@ -206,7 +199,7 @@ class FreyVoiceEnhancer(WaveForm):
         else:
             chunk = self.waveform[block_index:block_index + self.fft_n - 1]
 
-        fft_data = rfft(chunk)  # type: np.ndarray
+        fft_data = rfft(chunk)
         fft_conv = self.flt_spectral * fft_data
         self.new_waveform = np.append(self.new_waveform, irfft(fft_conv[1:]))
 
